@@ -334,11 +334,30 @@ const UploadPage: React.FC = () => {
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // === GUARD: MOUNTED STATE (Fix for Zombie State Updates) ===
+  // === GUARD: MOUNTED STATE & CONTEXT CLEANUP ===
   const isMounted = useRef(true);
   useEffect(() => {
     isMounted.current = true;
-    return () => { isMounted.current = false; };
+    
+    // 1. Aggressive Mount Reset
+    setIsProcessing(false);
+    setIsLoading(false);
+    setIsButtonLoading(false);
+    setProcessingCandidateId(null);
+    setLoadingStage("系統初始化中...");
+    setCurrentStepIndex(0);
+    setError(null);
+    processingLock.current = false;
+
+    return () => { 
+        isMounted.current = false;
+        // 2. Aggressive Unmount Cleanup (Prevent Context Pollution)
+        if (processingLock.current) {
+            console.warn("UploadPage unmounted while processing. Forcing global unlock.");
+            setIsLoading(false); // Unlock Context
+            processingLock.current = false; // Release Thread Lock
+        }
+    };
   }, []);
 
   // Config Hash Calculation
@@ -367,20 +386,6 @@ const UploadPage: React.FC = () => {
     else if (lowerMsg.includes('visual') || lowerMsg.includes('avatar') || lowerMsg.includes('頭像')) setCurrentStepIndex(5);
     else setCurrentStepIndex(0);
   }, [loadingStage, isProcessing]);
-
-  // === CRITICAL FIX: AGGRESSIVE MOUNT RESET ===
-  // Force reset all loading flags when component mounts to prevent "Zombie State"
-  // from previous cancelled operations or navigation.
-  useEffect(() => {
-      setIsProcessing(false);
-      setIsLoading(false);
-      setIsButtonLoading(false); // Reset button loading state too
-      setProcessingCandidateId(null);
-      setLoadingStage("系統初始化中...");
-      setCurrentStepIndex(0);
-      setError(null);
-      processingLock.current = false; // Force unlock thread guard
-  }, []); // Run once on mount
 
   // Live Check
   useEffect(() => {

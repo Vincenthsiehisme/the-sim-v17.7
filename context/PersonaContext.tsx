@@ -120,6 +120,7 @@ export const PersonaProvider: React.FC<{ children: ReactNode }> = ({ children })
       setSimulatorStateState({ campaignName: '', copyA: '', copyB: '', result: null });
       setSimulationModifiers(null);
       setScenarioModeState('sales');
+      setIsLoading(false); // [FIX] Ensure global loading is reset to prevent context pollution
       
       localStorage.removeItem(STORAGE_KEY_PERSONA);
       localStorage.removeItem(STORAGE_KEY_MESSAGES);
@@ -154,7 +155,6 @@ export const PersonaProvider: React.FC<{ children: ReactNode }> = ({ children })
           const newBaselines = calculateBaselines(newPersona);
           setSimulationModifiers(newBaselines);
           // Keep Chat Messages empty (already cleared via clearSession usually called before this)
-          // But if not cleared, we might want to clear here? 
           // Best practice: Caller invokes clearSession() before generation starts.
       } else {
           // If just updating (e.g. Avatar generation), keep existing Modifiers
