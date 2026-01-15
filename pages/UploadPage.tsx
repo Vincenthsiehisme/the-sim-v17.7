@@ -320,6 +320,10 @@ const UploadPage: React.FC = () => {
   // New local state for button feedback (Instant Reaction)
   const [isButtonLoading, setIsButtonLoading] = useState(false);
   
+  // === CRITICAL FIX: REF-BASED LOCK FOR THREAD SAFETY ===
+  // Prevents race conditions from double clicks or async state updates
+  const processingLock = useRef(false);
+
   // Report & Live Stats
   const [finalReport, setFinalReport] = useState<DataHealthReport | null>(null);
   const [isScanning, setIsScanning] = useState(false);
@@ -375,6 +379,7 @@ const UploadPage: React.FC = () => {
       setLoadingStage("系統初始化中...");
       setCurrentStepIndex(0);
       setError(null);
+      processingLock.current = false; // Force unlock thread guard
   }, []); // Run once on mount
 
   // Live Check
@@ -401,7 +406,11 @@ const UploadPage: React.FC = () => {
           setCandidates([]);
           setProductInput({ name: '', price: '', desc: '' });
       }
+      // Safety Cleanup when switching tabs
       setError(null);
+      setProcessingCandidateId(null);
+      setIsButtonLoading(false);
+      processingLock.current = false; // Release lock on tab switch
   }, [activeTab]);
 
   // Scenario Change Handler
@@ -419,6 +428,8 @@ const UploadPage: React.FC = () => {
   // PRODUCT MIRROR: Handle Analysis
   const handleProductAnalysis = async () => {
       if (!productInput.name) { setError("請輸入產品名稱"); return; }
+      if (isAnalyzingProduct) return; // Simple boolean check is fine for local ops
+
       setIsAnalyzingProduct(true);
       setError(null);
       setCandidates([]);
@@ -445,7 +456,9 @@ const UploadPage: React.FC = () => {
    * Triggered by Product Mirror candidates.
    */
   const handleDirectGeneration = async (c: PersonaCandidate) => {
-      // 0. Safety Check
+      // 0. Safety Checks
+      if (processingLock.current) return; // Strict Lock Check
+      
       if (!c.resonance_analysis || !c.source_snapshot) {
           alert("此候選人資料結構不完整 (缺少快照或分析數據)，請重新分析產品。");
           return;
@@ -456,10 +469,12 @@ const UploadPage: React.FC = () => {
           if (!window.confirm("偵測到已存在的數位分身。建立新分析將會覆蓋目前的進度與對話紀錄。\n\n確定要繼續嗎？")) return;
       }
 
-      // 2. Immediate UI Feedback
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      // 2. Lock & Feedback
+      processingLock.current = true;
+      setIsButtonLoading(true); // Lock other buttons
+      setProcessingCandidateId(c.id); // Show spinner on specific card
       
-      setProcessingCandidateId(c.id);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
       setIsProcessing(true); // Lock full screen
       setIsLoading(true);
       setError(null);
@@ -534,10 +549,12 @@ const UploadPage: React.FC = () => {
 
               setPersona(generatedPersona); // Write new state (triggers atomic write to storage)
               
-              // Unlock UI
+              // Unlock UI (Will navigate away, but cleanup is good practice)
               setIsProcessing(false);
               setIsLoading(false);
               setProcessingCandidateId(null);
+              setIsButtonLoading(false);
+              processingLock.current = false;
 
               navigate('/dashboard');
           }
@@ -557,6 +574,8 @@ const UploadPage: React.FC = () => {
               setIsProcessing(false);
               setIsLoading(false);
               setProcessingCandidateId(null);
+              setIsButtonLoading(false);
+              processingLock.current = false; // Release lock
           }
       } 
   };
@@ -639,20 +658,23 @@ const UploadPage: React.FC = () => {
   /**
    * STANDARD PROCESS DATA (Button Trigger)
    * Handles both Upload and Lab manual generation.
-   * IMPLEMENTS ATOMIC SWAP PATTERN.
+   * IMPLEMENTS ATOMIC SWAP PATTERN & REF LOCK.
    */
   const processData = async () => {
-    // 1. Initial State Checks
-    if (isAnalyzingDNA || isProcessing || isButtonLoading) return;
+    // 1. Initial State Checks with REF LOCK
+    if (processingLock.current || isButtonLoading || isProcessing) return;
 
-    // IMMEDIATE FEEDBACK: Lock button
+    // IMMEDIATE FEEDBACK: Lock button & Ref
+    processingLock.current = true;
     setIsButtonLoading(true);
     setError(null);
 
     // 2. Persona Override Check
     if (persona) {
       if (!window.confirm("偵測到已存在的數位分身。建立新分析將會覆蓋目前的進度與對話紀錄。\n\n確定要繼續嗎？")) {
-          setIsButtonLoading(false); // Reset if cancelled
+          // Reset if cancelled
+          setIsButtonLoading(false); 
+          processingLock.current = false;
           return;
       }
     }
@@ -667,6 +689,7 @@ const UploadPage: React.FC = () => {
             if (!labConfig.role) {
                 setError("請輸入角色身份");
                 setIsButtonLoading(false);
+                processingLock.current = false;
                 return;
             }
             
@@ -687,7 +710,8 @@ const UploadPage: React.FC = () => {
                     if (isMounted.current) {
                         setEnrichedDNA(currentDNA);
                     } else {
-                        return; // Stop if unmounted
+                        // Stop if unmounted, no need to unlock as component is gone
+                        return; 
                     }
                 } catch (e: any) { 
                     if (isMounted.current) {
@@ -698,6 +722,7 @@ const UploadPage: React.FC = () => {
                         window.scrollTo({ top: 0, behavior: 'smooth' });
                         setIsAnalyzingDNA(false);
                         setIsButtonLoading(false);
+                        processingLock.current = false;
                     }
                     return; // Stop execution
                 } finally { 
@@ -754,12 +779,14 @@ const UploadPage: React.FC = () => {
                 } catch (e) { 
                     setError("讀取檔案失敗"); 
                     setIsButtonLoading(false); 
+                    processingLock.current = false;
                     return; 
                 }
             }
             if (!effectiveRawData.trim()) { 
                 setError("數據內容為空"); 
                 setIsButtonLoading(false); 
+                processingLock.current = false;
                 return; 
             }
             
@@ -796,6 +823,7 @@ const UploadPage: React.FC = () => {
             setIsProcessing(false);
             setIsLoading(false);
             setIsButtonLoading(false);
+            processingLock.current = false;
             
             navigate('/dashboard');
         }
@@ -815,6 +843,7 @@ const UploadPage: React.FC = () => {
           setIsProcessing(false);
           setIsLoading(false);
           setIsButtonLoading(false);
+          processingLock.current = false;
       }
     } 
   };
