@@ -317,6 +317,9 @@ const UploadPage: React.FC = () => {
   const [enrichedDNA, setEnrichedDNA] = useState<PersonaDNA | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   
+  // New local state for button feedback (Instant Reaction)
+  const [isButtonLoading, setIsButtonLoading] = useState(false);
+  
   // Report & Live Stats
   const [finalReport, setFinalReport] = useState<DataHealthReport | null>(null);
   const [isScanning, setIsScanning] = useState(false);
@@ -361,15 +364,17 @@ const UploadPage: React.FC = () => {
     else setCurrentStepIndex(0);
   }, [loadingStage, isProcessing]);
 
-  // === CRITICAL FIX: AGGRESSIVE STATE RESET ON MOUNT ===
-  // When this component mounts, we MUST ensure the processing flags are cleared.
-  // This prevents the "unclickable" state if the user navigates back from Dashboard.
+  // === CRITICAL FIX: AGGRESSIVE MOUNT RESET ===
+  // Force reset all loading flags when component mounts to prevent "Zombie State"
+  // from previous cancelled operations or navigation.
   useEffect(() => {
       setIsProcessing(false);
       setIsLoading(false);
+      setIsButtonLoading(false); // Reset button loading state too
       setProcessingCandidateId(null);
       setLoadingStage("系統初始化中...");
       setCurrentStepIndex(0);
+      setError(null);
   }, []); // Run once on mount
 
   // Live Check
@@ -389,11 +394,9 @@ const UploadPage: React.FC = () => {
 
   // Auto-Clear State on Tab Switch to prevent cache pollution
   useEffect(() => {
-      // When switching away from Lab, clear DNA cache
       if (activeTab !== 'lab') {
           setEnrichedDNA(null);
       }
-      // When switching away from Product, clear candidates (optional, but cleaner)
       if (activeTab !== 'product') {
           setCandidates([]);
           setProductInput({ name: '', price: '', desc: '' });
@@ -438,11 +441,11 @@ const UploadPage: React.FC = () => {
   };
 
   /**
-   * DIRECT GENERATION PIPELINE (Streamlined)
+   * DIRECT GENERATION PIPELINE (Streamlined & Atomic)
    * Triggered by Product Mirror candidates.
    */
   const handleDirectGeneration = async (c: PersonaCandidate) => {
-      // 0. Safety Check - Structure Validation
+      // 0. Safety Check
       if (!c.resonance_analysis || !c.source_snapshot) {
           alert("此候選人資料結構不完整 (缺少快照或分析數據)，請重新分析產品。");
           return;
@@ -457,22 +460,20 @@ const UploadPage: React.FC = () => {
       window.scrollTo({ top: 0, behavior: 'smooth' });
       
       setProcessingCandidateId(c.id);
-      setIsProcessing(true);
+      setIsProcessing(true); // Lock full screen
       setIsLoading(true);
       setError(null);
       setLoadingStage("啟動快速生成通道 (Direct Mode)...");
       setCurrentStepIndex(0);
       
-      // CRITICAL: Do NOT clear session early. Keep old data as backup until success.
+      // NOTE: We do NOT clear the session here. We only clear it upon SUCCESS (Atomic Swap).
 
       try {
-          // STEP 1: Enrich DNA (WITH PRI PAYLOAD)
+          // STEP 1: Enrich DNA
           setLoadingStage("🧬 正在解析角色基因 (DNA Analysis)...");
           
           const shadowId = SCENARIO_OPTIONS.some(s => s.id === c.shadow_id) ? c.shadow_id : 'auto';
           const gender = c.gender_guess || 'General';
-          
-          // Use SNAPSHOT data, not current input state
           const productName = c.source_snapshot.product_name;
 
           const resonancePayload = {
@@ -508,7 +509,7 @@ const UploadPage: React.FC = () => {
           
           const creationConfig: OriginProfile = {
               source_type: 'synthetic',
-              parent_candidate_id: c.id, // Linkage
+              parent_candidate_id: c.id, 
               skeleton: skeleton,
               dna: dna,
               shadow: { 
@@ -525,16 +526,15 @@ const UploadPage: React.FC = () => {
           }, (stage) => { if(isMounted.current) setLoadingStage(stage); });
 
           // === ATOMIC STATE SWAP ===
-          // Only execute if component is still mounted
+          // Only execute swap if component is still mounted and generation succeeded
           if (isMounted.current) {
-              clearSession();
-              // Force clear storage to prevent zombies
-              localStorage.removeItem('the_sim_persona_v1');
-              setEnrichedDNA(null); // Clear Lab state
+              clearSession(); // Clean old state
+              localStorage.removeItem('the_sim_persona_v1'); // Clean storage
+              setEnrichedDNA(null); 
 
-              setPersona(generatedPersona);
+              setPersona(generatedPersona); // Write new state (triggers atomic write to storage)
               
-              // Safely unlock UI
+              // Unlock UI
               setIsProcessing(false);
               setIsLoading(false);
               setProcessingCandidateId(null);
@@ -543,7 +543,6 @@ const UploadPage: React.FC = () => {
           }
 
       } catch (e: any) {
-          // GUARDED ERROR HANDLING
           if (isMounted.current) {
               console.error("Direct Generation Failed", e);
               const errorMsg = e.message || "生成失敗，請稍後再試。";
@@ -554,13 +553,12 @@ const UploadPage: React.FC = () => {
               setError(displayMsg);
               window.scrollTo({ top: 0, behavior: 'smooth' });
               
-              // Ensure we exit processing state
+              // Ensure we exit processing state but KEEP OLD DATA
               setIsProcessing(false);
               setIsLoading(false);
               setProcessingCandidateId(null);
           }
       } 
-      // NO FINALLY BLOCK: Logic is handled in try/catch to respect isMounted
   };
 
   // LAB: Enriched DNA
@@ -580,7 +578,6 @@ const UploadPage: React.FC = () => {
               labConfig.shadow,
               labConfig.gender
           );
-          // NEW: Tag DNA with signature
           dna.config_signature = currentConfigHash;
           
           if (isMounted.current) {
@@ -642,37 +639,40 @@ const UploadPage: React.FC = () => {
   /**
    * STANDARD PROCESS DATA (Button Trigger)
    * Handles both Upload and Lab manual generation.
+   * IMPLEMENTS ATOMIC SWAP PATTERN.
    */
   const processData = async () => {
     // 1. Initial State Checks
-    if (isAnalyzingDNA || isProcessing) return;
+    if (isAnalyzingDNA || isProcessing || isButtonLoading) return;
 
+    // IMMEDIATE FEEDBACK: Lock button
+    setIsButtonLoading(true);
+    setError(null);
+
+    // 2. Persona Override Check
     if (persona) {
       if (!window.confirm("偵測到已存在的數位分身。建立新分析將會覆蓋目前的進度與對話紀錄。\n\n確定要繼續嗎？")) {
+          setIsButtonLoading(false); // Reset if cancelled
           return;
       }
     }
 
-    // 2. Prepare Context
+    // 3. Prepare Context
     let effectiveRawData = "";
     let effectiveDataSource = "";
     let creationConfig: OriginProfile = { source_type: 'upload' };
-    
-    // 3. UI Locking
-    setError(null);
-    // Don't set isProcessing yet until we pass preliminary checks (esp. DNA)
     
     try {
         if (activeTab === 'lab') {
             if (!labConfig.role) {
                 setError("請輸入角色身份");
+                setIsButtonLoading(false);
                 return;
             }
             
             let currentDNA = enrichedDNA;
             
             // --- DNA STALE CHECK (Auto-Regenerate) ---
-            // If parameters changed, regenerate DNA first.
             if (!currentDNA || currentDNA.config_signature !== currentConfigHash) {
                 setIsAnalyzingDNA(true);
                 try {
@@ -697,6 +697,7 @@ const UploadPage: React.FC = () => {
                         setError(msg);
                         window.scrollTo({ top: 0, behavior: 'smooth' });
                         setIsAnalyzingDNA(false);
+                        setIsButtonLoading(false);
                     }
                     return; // Stop execution
                 } finally { 
@@ -704,12 +705,12 @@ const UploadPage: React.FC = () => {
                 }
             }
 
-            // Now entering main synthesis phase
-            setIsProcessing(true);
+            // Enter Processing State
+            setIsProcessing(true); // Full screen loader
             setIsLoading(true);
             window.scrollTo({ top: 0, behavior: 'smooth' });
             setLoadingStage("🧬 正在合成行為基因 (Synthesizing DNA)...");
-            setCurrentStepIndex(0); // Reset step
+            setCurrentStepIndex(0); 
 
             effectiveRawData = await synthesizePersonaData(
                 { 
@@ -750,9 +751,17 @@ const UploadPage: React.FC = () => {
                 try {
                     const fileText = await selectedFile.text();
                     effectiveRawData = selectedFile ? (fileText + "\n" + textInput) : textInput;
-                } catch (e) { setError("讀取檔案失敗"); return; }
+                } catch (e) { 
+                    setError("讀取檔案失敗"); 
+                    setIsButtonLoading(false); 
+                    return; 
+                }
             }
-            if (!effectiveRawData.trim()) { setError("數據內容為空"); return; }
+            if (!effectiveRawData.trim()) { 
+                setError("數據內容為空"); 
+                setIsButtonLoading(false); 
+                return; 
+            }
             
             effectiveDataSource = inputMode === 'qualitative' ? 'qualitative_feedback' : 'transactional_data';
             creationConfig = { source_type: 'upload' };
@@ -766,7 +775,7 @@ const UploadPage: React.FC = () => {
         }
 
         // --- COMMON PIPELINE (Analyze & Create) ---
-        // Do NOT clear session here. Wait for success.
+        // Note: We have NOT cleared the session yet. Old data persists if this fails.
 
         const generatedPersona = await analyzeDataAndCreatePersona(effectiveRawData, {
             dataSource: effectiveDataSource,
@@ -776,23 +785,24 @@ const UploadPage: React.FC = () => {
       
         // === ATOMIC STATE SWAP ===
         if (isMounted.current) {
-            clearSession();
+            clearSession(); // Remove old data
             localStorage.removeItem('the_sim_persona_v1');
 
-            // Do NOT clear Lab DNA here if we are in Lab Mode (we need it for UI), but do clear it if in Upload Mode
             if (activeTab !== 'lab') setEnrichedDNA(null);
 
-            setPersona(generatedPersona);
+            setPersona(generatedPersona); // Inject new data
             
+            // Release locks
             setIsProcessing(false);
             setIsLoading(false);
+            setIsButtonLoading(false);
+            
             navigate('/dashboard');
         }
 
     } catch (err: any) {
       if (isMounted.current) {
           console.error(err);
-          // Detailed error message handling
           const isRateLimit = err.message?.includes('429') || err.message?.includes('quota');
           const errorMsg = isRateLimit 
               ? "系統忙碌中 (429 Too Many Requests)。請等待 10-15 秒後再試。" 
@@ -801,12 +811,12 @@ const UploadPage: React.FC = () => {
           setError(errorMsg);
           window.scrollTo({ top: 0, behavior: 'smooth' });
           
-          // Ensure we exit processing state
+          // Release locks, keep old data
           setIsProcessing(false);
           setIsLoading(false);
+          setIsButtonLoading(false);
       }
     } 
-    // NO FINALLY BLOCK to avoid race conditions
   };
 
   const handleFileChange = (file: File | null) => {
@@ -1006,8 +1016,13 @@ const UploadPage: React.FC = () => {
                   ) : (
                      <div className="space-y-6 animate-fade-in">
                         <DataHealthIndicator report={finalReport} />
-                        <button onClick={processData} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold text-xl shadow-xl hover:bg-indigo-700 hover:shadow-2xl transition-all flex items-center justify-center gap-2 hover:-translate-y-1">
-                           <Sparkles className="w-6 h-6 animate-pulse" /> 生成數位分身
+                        <button 
+                           onClick={processData}
+                           disabled={isButtonLoading}
+                           className={`w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold text-xl shadow-xl transition-all flex items-center justify-center gap-2 hover:-translate-y-1 ${isButtonLoading ? 'opacity-70 cursor-wait' : 'hover:bg-indigo-700 hover:shadow-2xl'}`}
+                        >
+                           {isButtonLoading ? <Loader2 className="w-6 h-6 animate-spin" /> : <Sparkles className="w-6 h-6 animate-pulse" />}
+                           {isButtonLoading ? "讀取中..." : "生成數位分身"}
                         </button>
                         {error && (
                            <p className="text-center text-rose-500 font-bold text-xs bg-rose-50 p-2 rounded-lg border border-rose-200">
@@ -1195,10 +1210,10 @@ const UploadPage: React.FC = () => {
                          </button>
                          <button
                            onClick={processData}
-                           disabled={!labConfig.role}
+                           disabled={!labConfig.role || isButtonLoading}
                            className="w-full py-4 bg-violet-600 text-white font-bold rounded-xl shadow-lg hover:bg-violet-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50 hover:-translate-y-1"
                          >
-                            <Sparkles className="w-5 h-5 animate-pulse" />
+                            {isButtonLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5 animate-pulse" />}
                             生成行為數據 (Synthesize)
                          </button>
                          {error && (
